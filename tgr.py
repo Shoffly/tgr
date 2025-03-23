@@ -112,8 +112,52 @@ def load_data():
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 
+def get_recommended_cars(dealer_historical, live_cars_df):
+    if dealer_historical.empty:
+        return pd.DataFrame()
+
+    # Calculate dealer preferences
+    make_preferences = dealer_historical['make'].value_counts()
+    year_range = (dealer_historical['year'].min(), dealer_historical['year'].max())
+    price_range = (dealer_historical['price'].quantile(0.25), dealer_historical['price'].quantile(0.75))
+    km_range = (dealer_historical['kilometers'].quantile(0.25), dealer_historical['kilometers'].quantile(0.75))
+
+    # Score each car in live inventory
+    recommended_cars = live_cars_df.copy()
+
+    # Score based on make preference (0-3 points)
+    recommended_cars['make_score'] = recommended_cars['make'].map(
+        make_preferences / make_preferences.max() * 3
+    ).fillna(0)
+
+    # Score based on year (0-2 points)
+    recommended_cars['year_score'] = recommended_cars.apply(
+        lambda x: 2 if year_range[0] <= x['year'] <= year_range[1] else 0,
+        axis=1
+    )
+
+    # Score based on kilometers (0-2 points)
+    recommended_cars['km_score'] = recommended_cars.apply(
+        lambda x: 2 if km_range[0] <= x['kilometers'] <= km_range[1] else 0,
+        axis=1
+    )
+
+    # Calculate total score
+    recommended_cars['match_score'] = (
+            recommended_cars['make_score'] +
+            recommended_cars['year_score'] +
+            recommended_cars['km_score']
+    )
+
+    # Sort by score and return top matches
+    return (recommended_cars
+            .sort_values('match_score', ascending=False)
+            .drop(['make_score', 'year_score', 'km_score'], axis=1)
+            .head(10))
+
+
 def main():
-    st.title("🚗 Account Manager Dashboard - R")
+    st.title("🚗 TGR Dealer Analytics Dashboard")
 
     # Load data
     with st.spinner("Loading data..."):
@@ -287,20 +331,33 @@ def main():
 
     # Recommended Cars
     st.subheader("Recommended Cars")
-    # Here you would implement your car recommendation logic based on historical purchases
-    # For now, we'll just show available cars that match their historical preferences
-
     if not dealer_historical.empty:
-        preferred_makes = dealer_historical['make'].value_counts().index[:3].tolist()
-        recommended_cars = live_cars_df[live_cars_df['make'].isin(preferred_makes)]
+        recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
 
         if not recommended_cars.empty:
             st.dataframe(
                 recommended_cars,
+                column_config={
+                    "match_score": st.column_config.ProgressColumn(
+                        "Match Score",
+                        help="How well this car matches the dealer's preferences",
+                        format="%.1f",
+                        min_value=0,
+                        max_value=7
+                    ),
+                    "sf_vehicle_name": "Vehicle",
+                    "make": "Make",
+                    "model": "Model",
+                    "year": "Year",
+                    "kilometers": st.column_config.NumberColumn(
+                        "Mileage",
+                        format="%d km"
+                    )
+                },
                 use_container_width=True
             )
         else:
-            st.info("No current cars match this dealer's preferences")
+            st.info("No matching cars found in current inventory")
     else:
         st.info("Cannot generate recommendations without historical data")
 
