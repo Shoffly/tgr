@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # Set page config
 st.set_page_config(
-    page_title="TGR Dealer Analytics Dashboard",
+    page_title="TR - Sales Analytics Tool",
     page_icon="🚗",
     layout="wide"
 )
@@ -118,46 +118,134 @@ def get_recommended_cars(dealer_historical, live_cars_df):
 
     # Calculate dealer preferences
     make_preferences = dealer_historical['make'].value_counts()
-    year_range = (dealer_historical['year'].min(), dealer_historical['year'].max())
-    price_range = (dealer_historical['price'].quantile(0.25), dealer_historical['price'].quantile(0.75))
-    km_range = (dealer_historical['kilometers'].quantile(0.25), dealer_historical['kilometers'].quantile(0.75))
+    make_score_weights = make_preferences / make_preferences.max() * 3  # Max 3 points for make
+
+    # Calculate model preferences within each make
+    model_preferences = dealer_historical.groupby(['make', 'model']).size().reset_index(name='count')
+    model_preferences['score'] = model_preferences.groupby('make')['count'].transform(
+        lambda x: (x / x.max() * 2) if x.max() > 0 else 0  # Max 2 points for model
+    )
+    model_score_dict = dict(zip(
+        zip(model_preferences['make'], model_preferences['model']),
+        model_preferences['score']
+    ))
+
+    # Create year buckets and calculate preferences
+    dealer_historical['year_bucket'] = pd.qcut(dealer_historical['year'], q=4, duplicates='drop')
+    year_preferences = dealer_historical['year_bucket'].value_counts()
+    year_score_weights = year_preferences / year_preferences.max() * 2  # Max 2 points for year
+
+    # Create kilometer buckets and calculate preferences
+    dealer_historical['km_bucket'] = pd.qcut(dealer_historical['kilometers'], q=4, duplicates='drop')
+    km_preferences = dealer_historical['km_bucket'].value_counts()
+    km_score_weights = km_preferences / km_preferences.max() * 2  # Max 2 points for kilometers
 
     # Score each car in live inventory
     recommended_cars = live_cars_df.copy()
 
     # Score based on make preference (0-3 points)
-    recommended_cars['make_score'] = recommended_cars['make'].map(
-        make_preferences / make_preferences.max() * 3
-    ).fillna(0)
+    recommended_cars['make_score'] = recommended_cars['make'].map(make_score_weights).fillna(0)
 
-    # Score based on year (0-2 points)
-    recommended_cars['year_score'] = recommended_cars.apply(
-        lambda x: 2 if year_range[0] <= x['year'] <= year_range[1] else 0,
+    # Score based on model preference (0-2 points)
+    recommended_cars['model_score'] = recommended_cars.apply(
+        lambda x: model_score_dict.get((x['make'], x['model']), 0),
         axis=1
     )
 
-    # Score based on kilometers (0-2 points)
-    recommended_cars['km_score'] = recommended_cars.apply(
-        lambda x: 2 if km_range[0] <= x['kilometers'] <= km_range[1] else 0,
-        axis=1
-    )
+    # Score based on year bucket (0-2 points)
+    recommended_cars['year_bucket'] = pd.qcut(recommended_cars['year'], q=4, duplicates='drop')
+    recommended_cars['year_score'] = recommended_cars['year_bucket'].map(year_score_weights).fillna(0)
 
-    # Calculate total score
+    # Score based on kilometer bucket (0-2 points)
+    recommended_cars['km_bucket'] = pd.qcut(recommended_cars['kilometers'], q=4, duplicates='drop')
+    recommended_cars['km_score'] = recommended_cars['km_bucket'].map(km_score_weights).fillna(0)
+
+    # Calculate total score (max 9 points)
     recommended_cars['match_score'] = (
             recommended_cars['make_score'] +
+            recommended_cars['model_score'] +
             recommended_cars['year_score'] +
             recommended_cars['km_score']
+    )
+
+    # Add score breakdown for transparency
+    recommended_cars['score_breakdown'] = recommended_cars.apply(
+        lambda x: f"Make: {x['make_score']:.1f}, Model: {x['model_score']:.1f}, "
+                  f"Year: {x['year_score']:.1f}, KM: {x['km_score']:.1f}",
+        axis=1
     )
 
     # Sort by score and return top matches
     return (recommended_cars
             .sort_values('match_score', ascending=False)
-            .drop(['make_score', 'year_score', 'km_score'], axis=1)
+            .drop(['make_score', 'model_score', 'year_score', 'km_score',
+                   'year_bucket', 'km_bucket'], axis=1)
             .head(10))
 
 
+def get_dealers_needing_attention(dealer_seg_df):
+    """Identify dealers who have moved from better to worse buckets."""
+
+    # Define bucket hierarchy (from best to worst)
+    bucket_hierarchy = {
+        'Frequent': 5,
+        'Active': 4,
+        'Churned': 3,
+        '1 Time Purchaser': 2,
+        'No Purchase': 1
+    }
+
+    # Add bucket score columns for comparison
+    attention_needed = dealer_seg_df.copy()
+    attention_needed['lifetime_score'] = attention_needed['final_bucket_lifetime'].map(bucket_hierarchy)
+    attention_needed['current_score'] = attention_needed['final_bucket_60d'].map(bucket_hierarchy)
+    attention_needed['bucket_drop'] = attention_needed['lifetime_score'] - attention_needed['current_score']
+
+    # Filter dealers who have dropped in bucket status
+    attention_needed = attention_needed[attention_needed['bucket_drop'] > 0].copy()
+
+    # Assign priority based on severity of drop and original status
+    def get_priority(row):
+        if row['final_bucket_lifetime'] == 'Frequent':
+            if row['final_bucket_60d'] == 'No Purchase':
+                return '🔴 Critical Priority'
+            elif row['final_bucket_60d'] in ['Churned', '1 Time Purchaser']:
+                return '🟠 High Priority'
+            else:  # Active
+                return '🟡 Medium Priority'
+        elif row['final_bucket_lifetime'] == 'Active':
+            if row['final_bucket_60d'] == 'No Purchase':
+                return '🟠 High Priority'
+            else:  # Churned or 1 Time Purchaser
+                return '🟡 Medium Priority'
+        else:
+            return '⚪ Low Priority'
+
+    attention_needed['status'] = attention_needed.apply(get_priority, axis=1)
+
+    # Calculate activity metrics
+    attention_needed['activity_drop'] = (
+            attention_needed['avg_requests_per_month_lifetime'] -
+            attention_needed['avg_requests_per_month_60d']
+    )
+
+    # Add transition description
+    attention_needed['transition'] = attention_needed.apply(
+        lambda x: f"{x['final_bucket_lifetime']} → {x['final_bucket_60d']}",
+        axis=1
+    )
+
+    # Sort by priority (Critical -> High -> Medium -> Low) and then by bucket drop
+    priority_order = ['🔴 Critical Priority', '🟠 High Priority', '🟡 Medium Priority', '⚪ Low Priority']
+    return attention_needed.sort_values(
+        ['status', 'bucket_drop', 'activity_drop'],
+        ascending=[True, False, False],
+        key=lambda x: pd.Categorical(x, categories=priority_order) if x.name == 'status' else x
+    )
+
+
 def main():
-    st.title("🚗 TGR Dealer Analytics Dashboard")
+    st.title("🚗 TR - Sales Analytics Tool")
 
     # Load data
     with st.spinner("Loading data..."):
@@ -167,199 +255,267 @@ def main():
         st.warning("No data available. Please check your Google Sheet connection.")
         return
 
-    # Sidebar filters
-    st.sidebar.header("Filters")
+    # Create main navigation
+    main_tab1, main_tab2 = st.tabs(["📥 Attention Inbox", "👤 Dealer Profile"])
 
-    # Get list of dealers that exist in both segmentation and activity data
-    valid_dealers = sorted(set(dealer_seg_df['dealer_name'].unique()) & set(activity_df['dealer_name'].unique()))
+    with main_tab1:
+        # Get dealers needing attention
+        attention_dealers = get_dealers_needing_attention(dealer_seg_df)
 
-    if not valid_dealers:
-        st.error("No dealers found with both segmentation and activity data.")
-        return
+        if attention_dealers.empty:
+            st.success("No dealers currently need attention! 🎉")
+        else:
+            # Display summary metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Cases", len(attention_dealers))
+            with col2:
+                critical_priority = len(attention_dealers[attention_dealers['status'] == '🔴 Critical Priority'])
+                st.metric("Critical Priority", critical_priority)
+            with col3:
+                high_priority = len(attention_dealers[attention_dealers['status'] == '🟠 High Priority'])
+                st.metric("High Priority", high_priority)
+            with col4:
+                med_priority = len(attention_dealers[attention_dealers['status'] == '🟡 Medium Priority'])
+                st.metric("Medium Priority", med_priority)
 
-    # Dealer selection
-    selected_dealer = st.sidebar.selectbox(
-        "Select Dealer",
-        options=valid_dealers,
-        index=0
-    )
+            # Display dealer list with key metrics and direct links
+            for _, dealer in attention_dealers.iterrows():
+                with st.expander(
+                        f"{dealer['status']} - {dealer['dealer_name']} ({dealer['transition']})"
+                ):
+                    col1, col2 = st.columns([2, 1])
 
-    # Get dealer details
-    dealer_info = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer]
-    dealer_activity = activity_df[activity_df['dealer_name'] == selected_dealer]
+                    with col1:
+                        st.write("**Activity Metrics:**")
+                        st.write(f"• Lifetime Monthly Requests: {dealer['avg_requests_per_month_lifetime']:.1f}")
+                        st.write(f"• Recent Monthly Requests: {dealer['avg_requests_per_month_60d']:.1f}")
+                        st.write(f"• Activity Drop: {dealer['activity_drop']:.1f} requests/month")
 
-    if dealer_info.empty:
-        st.error(f"No segmentation data found for dealer: {selected_dealer}")
-        return
+                    with col2:
+                        st.write("**Recent Activity:**")
+                        st.write(f"• 30-day Requests: {dealer['buy_requests_30d']}")
+                        st.write(f"• 30-day Purchases: {dealer['sold_cars_30d']}")
 
-    if dealer_activity.empty:
-        st.error(f"No activity data found for dealer: {selected_dealer}")
-        return
+                    # Add navigation button
+                    if st.button("👤 View Full Profile", key=f"view_profile_{dealer['dealer_name']}"):
+                        st.query_params["dealer"] = dealer['dealer_name']
+                        st.query_params["tab"] = "Dealer Profile"
+                        st.rerun()
 
-    dealer_info = dealer_info.iloc[0]
-    dealer_activity = dealer_activity.iloc[0]
+    with main_tab2:
+        # Sidebar filters
+        st.sidebar.header("Filters")
 
-    # Main content
-    st.header(f"Dealer Profile: {selected_dealer}")
+        # Get list of dealers that exist in both segmentation and activity data
+        valid_dealers = sorted(set(dealer_seg_df['dealer_name'].unique()) & set(activity_df['dealer_name'].unique()))
 
-    # Key metrics
-    col1, col2, col3, col4 = st.columns(4)
+        if not valid_dealers:
+            st.error("No dealers found with both segmentation and activity data.")
+            return
 
-    with col1:
-        st.metric("Total Lifetime Purchases", dealer_info['total_purchases_lifetime'])
-        st.metric("Last 60 Days Purchases", dealer_info['total_purchases_60d'])
+        # Dealer selection - check if we came from inbox
+        default_dealer = st.query_params.get('dealer', None)
+        default_index = valid_dealers.index(default_dealer) if default_dealer in valid_dealers else 0
 
-    with col2:
-        st.metric("Total Lifetime Requests", dealer_info['total_requests_lifetime'])
-        st.metric("Last 60 Days Requests", dealer_info['total_requests_60d'])
-
-    with col3:
-        st.metric("Active Days (30d)", dealer_activity['active_days_30d'])
-        st.metric("Car Events (30d)", dealer_activity['total_car_events_30d'])
-
-    with col4:
-        st.metric("Active Days (7d)", dealer_activity['active_days_7d'])
-        st.metric("Car Events (7d)", dealer_activity['total_car_events_7d'])
-
-    # Segmentation Information
-    st.subheader("Dealer Segmentation")
-
-    seg_col1, seg_col2 = st.columns(2)
-
-    with seg_col1:
-        st.info(f"Lifetime Segment: {dealer_info['final_bucket_lifetime']}")
-        st.info(f"60-Day Segment: {dealer_info['final_bucket_60d']}")
-
-    with seg_col2:
-        st.info(f"Request Activity (Lifetime): {dealer_info['request_activity_bucket_lifetime']}")
-        st.info(f"Request Activity (60d): {dealer_info['request_activity_bucket_60d']}")
-
-    # Historical Purchase Analysis
-    st.subheader("Historical Purchase Analysis")
-    dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
-
-    if not dealer_historical.empty:
-        # Clean the data for visualization
-        dealer_historical['kilometers'] = dealer_historical['kilometers'].fillna(dealer_historical['kilometers'].mean())
-
-        # Create tabs for different visualizations
-        hist_tab1, hist_tab2, hist_tab3 = st.tabs(["Purchase Timeline", "Price Distribution", "Make Distribution"])
-
-        with hist_tab1:
-            # Create time series of purchases with better handling of missing values
-            fig = px.scatter(dealer_historical,
-                             x='request_date',
-                             y='price',
-                             color='make',
-                             size='kilometers',
-                             hover_data=['model', 'year', 'margin'],
-                             title='Historical Purchases Over Time',
-                             size_max=30)  # Limit maximum bubble size
-
-            # Customize the layout
-            fig.update_layout(
-                xaxis_title="Request Date",
-                yaxis_title="Price (EGP)",
-                showlegend=True
-            )
-            st.plotly_chart(fig, use_container_width=True)
-
-        with hist_tab2:
-            # Price distribution by make
-            fig = px.box(dealer_historical,
-                         x='make',
-                         y='price',
-                         title='Price Distribution by Make',
-                         points="all")  # Show all points
-            st.plotly_chart(fig, use_container_width=True)
-
-        with hist_tab3:
-            # Make distribution
-            make_counts = dealer_historical['make'].value_counts()
-            fig = px.pie(values=make_counts.values,
-                         names=make_counts.index,
-                         title='Distribution of Makes in Historical Purchases')
-            st.plotly_chart(fig, use_container_width=True)
-
-        # Show recent purchases with better formatting
-        st.subheader("Recent Purchase History")
-        recent_purchases = dealer_historical.sort_values('request_date', ascending=False).head(10)
-
-        # Format the dataframe for display
-        display_df = recent_purchases[['request_date', 'make', 'model', 'year', 'kilometers', 'price', 'margin']].copy()
-
-        # Format numeric columns
-        display_df['price'] = display_df['price'].apply(lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A")
-        display_df['kilometers'] = display_df['kilometers'].apply(lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A")
-        display_df['margin'] = display_df['margin'].apply(lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A")
-
-        # Format date column
-        display_df['request_date'] = display_df['request_date'].dt.strftime('%Y-%m-%d')
-
-        st.dataframe(
-            display_df,
-            column_config={
-                "request_date": "Request Date",
-                "make": "Make",
-                "model": "Model",
-                "year": "Year",
-                "kilometers": "Mileage",
-                "price": "Price",
-                "margin": "Margin"
-            },
-            use_container_width=True
+        # Dealer selection
+        selected_dealer = st.sidebar.selectbox(
+            "Select Dealer",
+            options=valid_dealers,
+            index=default_index
         )
 
-        # Add summary statistics
-        st.subheader("Purchase Summary Statistics")
-        col1, col2, col3 = st.columns(3)
+        # Get dealer details
+        dealer_info = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer]
+        dealer_activity = activity_df[activity_df['dealer_name'] == selected_dealer]
+
+        if dealer_info.empty:
+            st.error(f"No segmentation data found for dealer: {selected_dealer}")
+            return
+
+        if dealer_activity.empty:
+            st.error(f"No activity data found for dealer: {selected_dealer}")
+            return
+
+        dealer_info = dealer_info.iloc[0]
+        dealer_activity = dealer_activity.iloc[0]
+
+        # Main content
+        st.header(f"Dealer Profile: {selected_dealer}")
+
+        # Key metrics
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            avg_price = dealer_historical['price'].mean()
-            st.metric("Average Purchase Price", f"{avg_price:,.0f} EGP")
+            st.metric("Total Lifetime Purchases", dealer_info['total_purchases_lifetime'])
+            st.metric("Last 60 Days Purchases", dealer_info['total_purchases_60d'])
 
         with col2:
-            avg_km = dealer_historical['kilometers'].mean()
-            st.metric("Average Mileage", f"{avg_km:,.0f} km")
+            st.metric("Total Lifetime Requests", dealer_info['total_requests_lifetime'])
+            st.metric("Last 60 Days Requests", dealer_info['total_requests_60d'])
 
         with col3:
-            avg_margin = dealer_historical['margin'].mean()
-            st.metric("Average Margin", f"{avg_margin:,.0f} EGP")
+            st.metric("Active Days (30d)", dealer_activity['active_days_30d'])
+            st.metric("Car Events (30d)", dealer_activity['total_car_events_30d'])
 
-    else:
-        st.warning("No historical purchase data available for this dealer")
+        with col4:
+            st.metric("Active Days (7d)", dealer_activity['active_days_7d'])
+            st.metric("Car Events (7d)", dealer_activity['total_car_events_7d'])
 
-    # Recommended Cars
-    st.subheader("Recommended Cars")
-    if not dealer_historical.empty:
-        recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
+        # Segmentation Information
+        st.subheader("Dealer Segmentation")
 
-        if not recommended_cars.empty:
+        seg_col1, seg_col2 = st.columns(2)
+
+        with seg_col1:
+            st.info(f"Lifetime Segment: {dealer_info['final_bucket_lifetime']}")
+            st.info(f"60-Day Segment: {dealer_info['final_bucket_60d']}")
+
+        with seg_col2:
+            st.info(f"Request Activity (Lifetime): {dealer_info['request_activity_bucket_lifetime']}")
+            st.info(f"Request Activity (60d): {dealer_info['request_activity_bucket_60d']}")
+
+        # Move Recommended Cars section here
+        st.subheader("Recommended Cars")
+        dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
+
+        if not dealer_historical.empty:
+            recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
+
+            if not recommended_cars.empty:
+                st.dataframe(
+                    recommended_cars,
+                    column_config={
+                        "match_score": st.column_config.ProgressColumn(
+                            "Match Score",
+                            help="How well this car matches the dealer's preferences (max 9 points)",
+                            format="%.1f",
+                            min_value=0,
+                            max_value=9
+                        ),
+                        "score_breakdown": "Score Breakdown",
+                        "sf_vehicle_name": "Vehicle",
+                        "make": "Make",
+                        "model": "Model",
+                        "year": "Year",
+                        "kilometers": st.column_config.NumberColumn(
+                            "Mileage",
+                            format="%d km"
+                        )
+                    },
+                    use_container_width=True
+                )
+
+                # Add explanation of scoring system
+                st.info("""
+                **Scoring System:**
+                - Make: 0-3 points (based on frequency of purchases)
+                - Model: 0-2 points (based on frequency within make)
+                - Year: 0-2 points (based on preferred year ranges)
+                - Mileage: 0-2 points (based on preferred km ranges)
+                Total possible score: 9 points
+                """)
+            else:
+                st.info("No matching cars found in current inventory")
+        else:
+            st.info("Cannot generate recommendations without historical data")
+
+        # Historical Purchase Analysis (now after Recommended Cars)
+        st.subheader("Historical Purchase Analysis")
+
+        if not dealer_historical.empty:
+            # Clean the data for visualization
+            dealer_historical['kilometers'] = dealer_historical['kilometers'].fillna(
+                dealer_historical['kilometers'].mean())
+
+            # Create tabs for different visualizations
+            hist_tab1, hist_tab2, hist_tab3 = st.tabs(["Purchase Timeline", "Price Distribution", "Make Distribution"])
+
+            with hist_tab1:
+                # Create time series of purchases with better handling of missing values
+                fig = px.scatter(dealer_historical,
+                                 x='request_date',
+                                 y='price',
+                                 color='make',
+                                 size='kilometers',
+                                 hover_data=['model', 'year', 'margin'],
+                                 title='Historical Purchases Over Time',
+                                 size_max=30)  # Limit maximum bubble size
+
+                # Customize the layout
+                fig.update_layout(
+                    xaxis_title="Request Date",
+                    yaxis_title="Price (EGP)",
+                    showlegend=True
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+            with hist_tab2:
+                # Price distribution by make
+                fig = px.box(dealer_historical,
+                             x='make',
+                             y='price',
+                             title='Price Distribution by Make',
+                             points="all")  # Show all points
+                st.plotly_chart(fig, use_container_width=True)
+
+            with hist_tab3:
+                # Make distribution
+                make_counts = dealer_historical['make'].value_counts()
+                fig = px.pie(values=make_counts.values,
+                             names=make_counts.index,
+                             title='Distribution of Makes in Historical Purchases')
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Show recent purchases with better formatting
+            st.subheader("Recent Purchase History")
+            recent_purchases = dealer_historical.sort_values('request_date', ascending=False).head(10)
+
+            # Format the dataframe for display
+            display_df = recent_purchases[
+                ['request_date', 'make', 'model', 'year', 'kilometers', 'price', 'margin']].copy()
+
+            # Format numeric columns
+            display_df['price'] = display_df['price'].apply(lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A")
+            display_df['kilometers'] = display_df['kilometers'].apply(
+                lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A")
+            display_df['margin'] = display_df['margin'].apply(lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A")
+
+            # Format date column
+            display_df['request_date'] = display_df['request_date'].dt.strftime('%Y-%m-%d')
+
             st.dataframe(
-                recommended_cars,
+                display_df,
                 column_config={
-                    "match_score": st.column_config.ProgressColumn(
-                        "Match Score",
-                        help="How well this car matches the dealer's preferences",
-                        format="%.1f",
-                        min_value=0,
-                        max_value=7
-                    ),
-                    "sf_vehicle_name": "Vehicle",
+                    "request_date": "Request Date",
                     "make": "Make",
                     "model": "Model",
                     "year": "Year",
-                    "kilometers": st.column_config.NumberColumn(
-                        "Mileage",
-                        format="%d km"
-                    )
+                    "kilometers": "Mileage",
+                    "price": "Price",
+                    "margin": "Margin"
                 },
                 use_container_width=True
             )
+
+            # Add summary statistics
+            st.subheader("Purchase Summary Statistics")
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+                avg_price = dealer_historical['price'].mean()
+                st.metric("Average Purchase Price", f"{avg_price:,.0f} EGP")
+
+            with col2:
+                avg_km = dealer_historical['kilometers'].mean()
+                st.metric("Average Mileage", f"{avg_km:,.0f} km")
+
+            with col3:
+                avg_margin = dealer_historical['margin'].mean()
+                st.metric("Average Margin", f"{avg_margin:,.0f} EGP")
+
         else:
-            st.info("No matching cars found in current inventory")
-    else:
-        st.info("Cannot generate recommendations without historical data")
+            st.warning("No historical purchase data available for this dealer")
 
 
 if __name__ == "__main__":
