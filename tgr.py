@@ -130,15 +130,37 @@ def get_recommended_cars(dealer_historical, live_cars_df):
         model_preferences['score']
     ))
 
-    # Create year buckets and calculate preferences
-    dealer_historical['year_bucket'] = pd.qcut(dealer_historical['year'], q=4, duplicates='drop')
-    year_preferences = dealer_historical['year_bucket'].value_counts()
-    year_score_weights = year_preferences / year_preferences.max() * 2  # Max 2 points for year
+    # Calculate year preferences
+    avg_year = dealer_historical['year'].mean()
+    std_year = dealer_historical['year'].std()
 
-    # Create kilometer buckets and calculate preferences
-    dealer_historical['km_bucket'] = pd.qcut(dealer_historical['kilometers'], q=4, duplicates='drop')
-    km_preferences = dealer_historical['km_bucket'].value_counts()
-    km_score_weights = km_preferences / km_preferences.max() * 2  # Max 2 points for kilometers
+    def score_year(year):
+        if pd.isna(year) or pd.isna(avg_year):
+            return 0
+        diff = abs(year - avg_year)
+        if diff <= std_year:
+            return 2.0  # Perfect match
+        elif diff <= std_year * 2:
+            return 1.0  # Good match
+        elif diff <= std_year * 3:
+            return 0.5  # Acceptable match
+        return 0.0  # Poor match
+
+    # Calculate kilometer preferences
+    avg_km = dealer_historical['kilometers'].mean()
+    std_km = dealer_historical['kilometers'].std()
+
+    def score_kilometers(km):
+        if pd.isna(km) or pd.isna(avg_km):
+            return 0
+        diff = abs(km - avg_km)
+        if diff <= std_km:
+            return 2.0  # Perfect match
+        elif diff <= std_km * 2:
+            return 1.0  # Good match
+        elif diff <= std_km * 3:
+            return 0.5  # Acceptable match
+        return 0.0  # Poor match
 
     # Score each car in live inventory
     recommended_cars = live_cars_df.copy()
@@ -152,13 +174,11 @@ def get_recommended_cars(dealer_historical, live_cars_df):
         axis=1
     )
 
-    # Score based on year bucket (0-2 points)
-    recommended_cars['year_bucket'] = pd.qcut(recommended_cars['year'], q=4, duplicates='drop')
-    recommended_cars['year_score'] = recommended_cars['year_bucket'].map(year_score_weights).fillna(0)
+    # Score based on year (0-2 points)
+    recommended_cars['year_score'] = recommended_cars['year'].apply(score_year)
 
-    # Score based on kilometer bucket (0-2 points)
-    recommended_cars['km_bucket'] = pd.qcut(recommended_cars['kilometers'], q=4, duplicates='drop')
-    recommended_cars['km_score'] = recommended_cars['km_bucket'].map(km_score_weights).fillna(0)
+    # Score based on kilometers (0-2 points)
+    recommended_cars['km_score'] = recommended_cars['kilometers'].apply(score_kilometers)
 
     # Calculate total score (max 9 points)
     recommended_cars['match_score'] = (
@@ -178,8 +198,7 @@ def get_recommended_cars(dealer_historical, live_cars_df):
     # Sort by score and return top matches
     return (recommended_cars
             .sort_values('match_score', ascending=False)
-            .drop(['make_score', 'model_score', 'year_score', 'km_score',
-                   'year_bucket', 'km_bucket'], axis=1)
+            .drop(['make_score', 'model_score', 'year_score', 'km_score'], axis=1)
             .head(10))
 
 
