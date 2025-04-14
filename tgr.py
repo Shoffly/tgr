@@ -56,7 +56,7 @@ if check_password():
     def load_data():
         try:
             # Create a BigQuery client
-            client = bigquery.Client.from_service_account_json('service_account.json')
+            client = bigquery.Client.from_service_account_json(st.secrets["service_account"])
 
             # Live cars query
             live_cars_query = """
