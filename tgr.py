@@ -5,6 +5,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import hashlib
+import json
+from google.oauth2 import service_account
 
 # Authentication credentials
 CREDENTIALS = {
@@ -54,71 +56,86 @@ if check_password():
     # Function to load data from BigQuery
     @st.cache_data(ttl=43200)  # Cache data for 12 hours
     def load_data():
+        # Try to get credentials from Streamlit secrets first
         try:
-            # Create a BigQuery client
-            client = bigquery.Client.from_service_account_json(st.secrets["service_account"])
-
-            # Live cars query
-            live_cars_query = """
-            WITH sold AS ( 
-                SELECT sf_vehicle_name 
-                FROM `pricing-338819.ajans_dealers.dealer_requests`
-                WHERE request_status = 'Payment Log' or wholesale_vehicle_sold_date is not null
+            credentials = service_account.Credentials.from_service_account_info(
+                st.secrets["service_account"]
             )
-            SELECT avh.date_key, avh.sf_vehicle_name, avh.make, avh.model, avh.year, avh.kilometers 
-            FROM `pricing-338819.reporting.ajans_vehicle_history` avh
-            WHERE avh.date_key = current_date()
-            AND avh.sf_vehicle_name NOT IN (SELECT sf_vehicle_name FROM sold)
-            """
+        except (KeyError, FileNotFoundError):
+            # If secret not found, try to use service_account.json
+            try:
+                credentials = service_account.Credentials.from_service_account_file(
+                    'service_account.json'
+                )
+            except FileNotFoundError:
+                st.error(
+                    "No credentials found. Please configure either Streamlit secrets or provide a service_account.json file.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-            # Historical data query
-            historical_query = """
-            WITH s AS (
-                SELECT DISTINCT vehicle_id, 
-                       DATE(wholesale_vehicle_sold_date) AS request_date, 
-                       dealer_code,
-                       dealer_name, 
-                       dealer_phone,
-                       car_name,
-                       CASE 
-                           WHEN discount_enabled IS TRUE THEN discounted_price 
-                           ELSE buy_now_price 
-                       END AS price
-                FROM `pricing-338819.ajans_dealers.dealer_requests`
-                WHERE request_type = 'Buy Now' 
-                  AND wholesale_vehicle_sold_date IS NOT NULL
-            ), p as (
-                SELECT vehicle_id, min_published, minutes_published_for 
-                FROM `pricing-338819.ajans_dealers.ajans_wholesale_to_retail_publishing_logs`
-            ),
-            cost as (
-                SELECT DISTINCT car_name, sylndr_acquisition_price, market_retail_price, median_asked_price, refurbishment_cost 
-                FROM `pricing-338819.reporting.daily_car_status`
-            )
+        # Create a BigQuery client using the credentials
+        client = bigquery.Client(credentials=credentials)
 
-            SELECT s.request_date,s.dealer_code, round((p.minutes_published_for / 1440)) as time_on_app, s.price, c.make, c.model, c.year, c.kilometers,
-                   cost.sylndr_acquisition_price, cost.market_retail_price,
-                   s.dealer_name, s.dealer_phone
-            FROM s 
-            LEFT JOIN (
-                SELECT  distinct ajans_vehicle_id, make, model, year, kilometers 
-                FROM `pricing-338819.reporting.ajans_vehicle_history`
-            ) AS c 
-            ON s.vehicle_id = c.ajans_vehicle_id
-            LEFT JOIN cost on s.car_name = cost.car_name
-            LEFT JOIN p ON s.vehicle_id = p.vehicle_id
-            """
+        # Live cars query
+        live_cars_query = """
+        WITH sold AS ( 
+            SELECT sf_vehicle_name 
+            FROM `pricing-338819.ajans_dealers.dealer_requests`
+            WHERE request_status = 'Payment Log' or wholesale_vehicle_sold_date is not null
+        )
+        SELECT avh.date_key, avh.sf_vehicle_name, avh.make, avh.model, avh.year, avh.kilometers 
+        FROM `pricing-338819.reporting.ajans_vehicle_history` avh
+        WHERE avh.date_key = current_date()
+        AND avh.sf_vehicle_name NOT IN (SELECT sf_vehicle_name FROM sold)
+        """
 
-            # Dealer segmentation query
-            dealer_seg_query = """
-           WITH dealer_purchases_60d AS (
-    SELECT 
-        dealer_code,
-        dealer_name,
-        DATE(wholesale_vehicle_sold_date) as purchase_date
-    FROM ajans_dealers.dealer_requests
-    WHERE request_type = 'Buy Now' 
-    AND DATE(wholesale_vehicle_sold_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)
+        # Historical data query
+        historical_query = """
+        WITH s AS (
+            SELECT DISTINCT vehicle_id, 
+                   DATE(wholesale_vehicle_sold_date) AS request_date, 
+                   dealer_code,
+                   dealer_name, 
+                   dealer_phone,
+                   car_name,
+                   CASE 
+                       WHEN discount_enabled IS TRUE THEN discounted_price 
+                       ELSE buy_now_price 
+                   END AS price
+            FROM `pricing-338819.ajans_dealers.dealer_requests`
+            WHERE request_type = 'Buy Now' 
+              AND wholesale_vehicle_sold_date IS NOT NULL
+        ), p as (
+            SELECT vehicle_id, min_published, minutes_published_for 
+            FROM `pricing-338819.ajans_dealers.ajans_wholesale_to_retail_publishing_logs`
+        ),
+        cost as (
+            SELECT DISTINCT car_name, sylndr_acquisition_price, market_retail_price, median_asked_price, refurbishment_cost 
+            FROM `pricing-338819.reporting.daily_car_status`
+        )
+
+        SELECT s.request_date,s.dealer_code, round((p.minutes_published_for / 1440)) as time_on_app, s.price, c.make, c.model, c.year, c.kilometers,
+               cost.sylndr_acquisition_price, cost.market_retail_price,
+               s.dealer_name, s.dealer_phone
+        FROM s 
+        LEFT JOIN (
+            SELECT  distinct ajans_vehicle_id, make, model, year, kilometers 
+            FROM `pricing-338819.reporting.ajans_vehicle_history`
+        ) AS c 
+        ON s.vehicle_id = c.ajans_vehicle_id
+        LEFT JOIN cost on s.car_name = cost.car_name
+        LEFT JOIN p ON s.vehicle_id = p.vehicle_id
+        """
+
+        # Dealer segmentation query
+        dealer_seg_query = """
+       WITH dealer_purchases_60d AS (
+SELECT 
+    dealer_code,
+    dealer_name,
+    DATE(wholesale_vehicle_sold_date) as purchase_date
+FROM ajans_dealers.dealer_requests
+WHERE request_type = 'Buy Now' 
+AND DATE(wholesale_vehicle_sold_date) >= DATE_SUB(CURRENT_DATE(), INTERVAL 60 DAY)
 ),
 
 dealer_purchases_previous_60d AS (
@@ -496,79 +513,75 @@ SELECT
     END as request_activity_bucket_60d
 FROM metrics
 ORDER BY total_requests_lifetime DESC NULLS LAST;
-            """
+        """
 
-            # Dealer activity query
-            dealer_activity_query = """
-            WITH 
-            -- Dealers active in last 30 days
-            active_dealers_30d AS (
-                SELECT 
-                    dealer_code,
-                    dealer_name,
-                    COUNT(DISTINCT event_date) as active_days_30d,
-                    SUM(all_cars_events) as total_car_events_30d
-                FROM `pricing-338819.ajans_dealers.dealers_activity`
-                WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-                AND all_cars_events > 0
-                GROUP BY dealer_code, dealer_name
-            ),
-
-            -- Dealers active in last 7 days
-            active_dealers_7d AS (
-                SELECT 
-                    dealer_code,
-                    dealer_name,
-                    COUNT(DISTINCT event_date) as active_days_7d,
-                    SUM(all_cars_events) as total_car_events_7d
-                FROM `pricing-338819.ajans_dealers.dealers_activity`
-                WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
-                AND all_cars_events > 0
-                GROUP BY dealer_code, dealer_name
-            )
-
-            -- Combine results
+        # Dealer activity query
+        dealer_activity_query = """
+        WITH 
+        -- Dealers active in last 30 days
+        active_dealers_30d AS (
             SELECT 
-                COALESCE(d30.dealer_code, d7.dealer_code) as dealer_code,
-                COALESCE(d30.dealer_name, d7.dealer_name) as dealer_name,
-                COALESCE(d30.active_days_30d, 0) as active_days_30d,
-                COALESCE(d30.total_car_events_30d, 0) as total_car_events_30d,
-                COALESCE(d7.active_days_7d, 0) as active_days_7d,
-                COALESCE(d7.total_car_events_7d, 0) as total_car_events_7d
-            FROM active_dealers_30d d30
-            FULL OUTER JOIN active_dealers_7d d7 
-                ON d30.dealer_code = d7.dealer_code
-            ORDER BY 
-                active_days_30d DESC,
-                total_car_events_30d DESC
-            """
+                dealer_code,
+                dealer_name,
+                COUNT(DISTINCT event_date) as active_days_30d,
+                SUM(all_cars_events) as total_car_events_30d
+            FROM `pricing-338819.ajans_dealers.dealers_activity`
+            WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+            AND all_cars_events > 0
+            GROUP BY dealer_code, dealer_name
+        ),
 
-            # Execute queries
-            live_cars_df = client.query(live_cars_query).to_dataframe()
-            historical_df = client.query(historical_query).to_dataframe()
-            print(historical_df)
-            dealer_seg_df = client.query(dealer_seg_query).to_dataframe()
-            activity_df = client.query(dealer_activity_query).to_dataframe()
+        -- Dealers active in last 7 days
+        active_dealers_7d AS (
+            SELECT 
+                dealer_code,
+                dealer_name,
+                COUNT(DISTINCT event_date) as active_days_7d,
+                SUM(all_cars_events) as total_car_events_7d
+            FROM `pricing-338819.ajans_dealers.dealers_activity`
+            WHERE event_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)
+            AND all_cars_events > 0
+            GROUP BY dealer_code, dealer_name
+        )
 
-            # Convert date columns
-            historical_df['request_date'] = pd.to_datetime(historical_df['request_date'])
-            live_cars_df['date_key'] = pd.to_datetime(live_cars_df['date_key'])
+        -- Combine results
+        SELECT 
+            COALESCE(d30.dealer_code, d7.dealer_code) as dealer_code,
+            COALESCE(d30.dealer_name, d7.dealer_name) as dealer_name,
+            COALESCE(d30.active_days_30d, 0) as active_days_30d,
+            COALESCE(d30.total_car_events_30d, 0) as total_car_events_30d,
+            COALESCE(d7.active_days_7d, 0) as active_days_7d,
+            COALESCE(d7.total_car_events_7d, 0) as total_car_events_7d
+        FROM active_dealers_30d d30
+        FULL OUTER JOIN active_dealers_7d d7 
+            ON d30.dealer_code = d7.dealer_code
+        ORDER BY 
+            active_days_30d DESC,
+            total_car_events_30d DESC
+        """
 
-            # Convert numeric columns
-            numeric_columns = ['time_on_app', 'price', 'year', 'kilometers', 'sylndr_acquisition_price',
-                               'market_retail_price', 'median_asked_price', 'refurbishment_cost']
-            for col in numeric_columns:
-                if col in historical_df.columns:
-                    historical_df[col] = pd.to_numeric(historical_df[col], errors='coerce')
+        # Execute queries
+        live_cars_df = client.query(live_cars_query).to_dataframe()
+        historical_df = client.query(historical_query).to_dataframe()
+        print(historical_df)
+        dealer_seg_df = client.query(dealer_seg_query).to_dataframe()
+        activity_df = client.query(dealer_activity_query).to_dataframe()
 
-            live_cars_df['year'] = pd.to_numeric(live_cars_df['year'], errors='coerce')
-            live_cars_df['kilometers'] = pd.to_numeric(live_cars_df['kilometers'], errors='coerce')
+        # Convert date columns
+        historical_df['request_date'] = pd.to_datetime(historical_df['request_date'])
+        live_cars_df['date_key'] = pd.to_datetime(live_cars_df['date_key'])
 
-            return historical_df, live_cars_df, dealer_seg_df, activity_df
+        # Convert numeric columns
+        numeric_columns = ['time_on_app', 'price', 'year', 'kilometers', 'sylndr_acquisition_price',
+                           'market_retail_price', 'median_asked_price', 'refurbishment_cost']
+        for col in numeric_columns:
+            if col in historical_df.columns:
+                historical_df[col] = pd.to_numeric(historical_df[col], errors='coerce')
 
-        except Exception as e:
-            st.error(f"Error loading data: {str(e)}")
-            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        live_cars_df['year'] = pd.to_numeric(live_cars_df['year'], errors='coerce')
+        live_cars_df['kilometers'] = pd.to_numeric(live_cars_df['kilometers'], errors='coerce')
+
+        return historical_df, live_cars_df, dealer_seg_df, activity_df
 
 
     def get_dealers_needing_attention(dealer_seg_df):
