@@ -68,9 +68,10 @@ if check_password():
                     'service_account.json'
                 )
             except FileNotFoundError:
-                st.error("No credentials found. Please configure either Streamlit secrets or provide a service_account.json file.")
+                st.error(
+                    "No credentials found. Please configure either Streamlit secrets or provide a service_account.json file.")
                 return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-        
+
         # Create a BigQuery client using the credentials
         client = bigquery.Client(credentials=credentials)
 
@@ -716,7 +717,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
             # Initialize score components
             make_score = make_scores.get(car['make'], 0)
             model_score = model_preferences.get(car['make'], pd.Series()).get(car['model'], 0)
-            
+
             # Year score (0-2 points)
             year_diff = abs(car['year'] - year_mean)
             year_score = max(0, 2 - (year_diff / year_std)) if year_std > 0 else 0
@@ -886,7 +887,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
 
             # Recent Activity section
             st.subheader("Recent Activity")
-            
+
             # Get dealer's recent views and filters
             dealer_views = recent_views_df[recent_views_df['dealer_code'] == dealer_info['dealer_code']].copy()
             dealer_filters = recent_filters_df[recent_filters_df['dealer_code'] == dealer_info['dealer_code']].copy()
@@ -898,21 +899,21 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 if not dealer_views.empty:
                     # Format the time column
                     dealer_views['time'] = pd.to_datetime(dealer_views['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    
+
                     # Format the price column
                     dealer_views['buy_now_price'] = dealer_views['buy_now_price'].apply(
                         lambda x: f"EGP {x:,.0f}" if pd.notnull(x) else "N/A"
                     )
-                    
+
                     # Format the kilometrage column
                     dealer_views['kilometrage'] = dealer_views['kilometrage'].apply(
                         lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A"
                     )
-                    
+
                     # Display recent views
                     st.dataframe(
-                        dealer_views[['time', 'make', 'model', 'trim', 'year', 'kilometrage', 
-                                    'transmission', 'buy_now_price', 'body_style']],
+                        dealer_views[['time', 'make', 'model', 'trim', 'year', 'kilometrage',
+                                      'transmission', 'buy_now_price', 'body_style']],
                         column_config={
                             "time": "Viewed At",
                             "make": "Make",
@@ -933,16 +934,16 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 if not dealer_filters.empty:
                     # Format the time column
                     dealer_filters['time'] = pd.to_datetime(dealer_filters['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
-                    
+
                     # Format the kilometrage column
                     dealer_filters['kilometrage'] = dealer_filters['kilometrage'].apply(
                         lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A"
                     )
-                    
+
                     # Display recent filters
                     st.dataframe(
-                        dealer_filters[['time', 'make', 'model', 'year', 'kilometrage', 
-                                      'group_filter', 'status', 'no_of_cars']],
+                        dealer_filters[['time', 'make', 'model', 'year', 'kilometrage',
+                                        'group_filter', 'status', 'no_of_cars']],
                         column_config={
                             "time": "Filter Applied At",
                             "make": "Make",
@@ -962,7 +963,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                     st.info("No recent filter applications found for this dealer")
 
             # Recommended Cars section
-            st.subheader("Recommended Cars")
+            st.subheader("Recommended Cars - WIP")
             dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
 
             if not dealer_historical.empty:
