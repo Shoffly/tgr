@@ -811,8 +811,6 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
         Returns:
             DataFrame containing the dealer's OLX listings
         """
-        print(f"Debug: Fetching OLX listings for dealer_code: {dealer_id}")  # Debug print
-
         olx_query = """
         WITH cleaned_numbers AS (
             SELECT
@@ -907,12 +905,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
         )
 
         try:
-            # Print the query with the actual dealer_id for debugging
-            print(f"Debug: Query being executed:")
-            print(olx_query.replace("@dealer_id", f"'{dealer_id}'"))
-
             df = client.query(olx_query, job_config=job_config).to_dataframe()
-            print(f"Debug: Query returned {len(df)} rows")  # Debug print
             return df
         except Exception as e:
             print(f"Error executing query: {e}")
@@ -1179,9 +1172,88 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 else:
                     st.info("No recent filter applications found for this dealer")
 
+            # Add OLX Listings section
+            st.subheader("OLX Listings")
+
+            if dealer_info.empty:
+                st.warning("No dealer information available")
+            else:
+                try:
+                    # Get credentials and create client
+                    try:
+                        credentials = service_account.Credentials.from_service_account_info(
+                            st.secrets["service_account"]
+                        )
+                    except (KeyError, FileNotFoundError):
+                        try:
+                            credentials = service_account.Credentials.from_service_account_file(
+                                'service_account.json'
+                            )
+                        except FileNotFoundError:
+                            st.error("No credentials found for BigQuery access")
+                            credentials = None
+
+                    if credentials:
+                        client = bigquery.Client(credentials=credentials)
+                        dealer_data = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer].iloc[0]
+                        dealer_id = dealer_data['dealer_code']
+
+                        olx_listings = get_olx_listings_for_dealer(client, dealer_id)
+
+                        if not olx_listings.empty:
+                            # Format the dataframe for display
+                            display_df = olx_listings[[
+                                'added_at', 'title', 'make', 'model', 'year', 'kilometers',
+                                'price', 'condition', 'is_active', 'region'
+                            ]].copy()
+
+                            # Format date columns
+                            display_df['added_at'] = pd.to_datetime(display_df['added_at']).dt.strftime(
+                                '%Y-%m-%d %H:%M')
+
+                            # Format price
+                            display_df['price'] = display_df['price'].apply(
+                                lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A"
+                            )
+
+                            st.dataframe(
+                                display_df,
+                                column_config={
+                                    "added_at": "Listed Date",
+                                    "title": "Title",
+                                    "make": "Make",
+                                    "model": "Model",
+                                    "year": "Year",
+                                    "kilometers": "Mileage",
+                                    "price": "Price",
+                                    "condition": "Condition",
+                                    "is_active": "Active",
+                                    "region": "Region"
+                                },
+                                use_container_width=True
+                            )
+
+                            # Add summary metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                active_listings = len(olx_listings[olx_listings['is_active']])
+                                st.metric("Active Listings", active_listings)
+                            with col2:
+                                avg_price = olx_listings['price'].mean()
+                                st.metric("Average Price", f"{avg_price:,.0f} EGP")
+                            with col3:
+                                unique_models = len(olx_listings[['make', 'model']].drop_duplicates())
+                                st.metric("Unique Models", unique_models)
+                        else:
+                            st.info("No OLX listings found for this dealer in the last 30 days")
+                except Exception as e:
+                    st.error("Error fetching OLX listings")
+
+            # Get dealer historical data for recommendations and analysis
+            dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
+
             # Recommended Cars section
             st.subheader("Recommended Cars")
-            dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
 
             if not dealer_historical.empty:
                 recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
@@ -1272,160 +1344,8 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                                  title='Distribution of Makes in Historical Purchases')
                     st.plotly_chart(fig, use_container_width=True)
 
-                # Show recent purchases with better formatting
-                st.subheader("Recent Purchase History")
-                recent_purchases = dealer_historical.sort_values('request_date', ascending=False).head(10)
-
-                # Format the dataframe for display
-                display_df = recent_purchases[
-                    ['request_date', 'make', 'model', 'year', 'kilometers', 'price']].copy()
-
-                # Format numeric columns
-                display_df['price'] = display_df['price'].apply(lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A")
-                display_df['kilometers'] = display_df['kilometers'].apply(
-                    lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A")
-
-                # Format date column
-                display_df['request_date'] = display_df['request_date'].dt.strftime('%Y-%m-%d')
-
-                st.dataframe(
-                    display_df,
-                    column_config={
-                        "request_date": "Request Date",
-                        "make": "Make",
-                        "model": "Model",
-                        "year": "Year",
-                        "kilometers": "Mileage",
-                        "price": "Price"
-                    },
-                    use_container_width=True
-                )
-
-                # Add summary statistics
-                st.subheader("Purchase Summary Statistics")
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-                    avg_price = dealer_historical['price'].mean()
-                    st.metric("Average Purchase Price", f"{avg_price:,.0f} EGP")
-
-                with col2:
-                    avg_km = dealer_historical['kilometers'].mean()
-                    st.metric("Average Mileage", f"{avg_km:,.0f} km")
-
             else:
                 st.warning("No historical purchase data available for this dealer")
-
-            # Add OLX Listings section after Historical Purchase Analysis
-            st.subheader("OLX Listings")
-
-            if dealer_info.empty:
-                st.warning("No dealer information available")
-            else:
-                try:
-                    # Get credentials and create client
-                    try:
-                        credentials = service_account.Credentials.from_service_account_info(
-                            st.secrets["service_account"]
-                        )
-                    except (KeyError, FileNotFoundError):
-                        try:
-                            credentials = service_account.Credentials.from_service_account_file(
-                                'service_account.json'
-                            )
-                        except FileNotFoundError:
-                            st.error("No credentials found for BigQuery access")
-                            credentials = None
-
-                    if credentials:
-                        client = bigquery.Client(credentials=credentials)
-                        # Get dealer_id from dealer_seg_df using the selected dealer name
-                        dealer_data = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer].iloc[0]
-                        dealer_id = dealer_data['dealer_code']  # Using dealer_code as dealer_id
-
-                        # Debug information
-                        #st.write("Debug Information:")
-                        #st.write(f"Selected Dealer: {selected_dealer}")
-                        #st.write(f"Dealer Code: {dealer_id}")
-
-                        olx_listings = get_olx_listings_for_dealer(client, dealer_id)
-
-                        if not olx_listings.empty:
-                            # Format the dataframe for display
-                            display_df = olx_listings[[
-                                'added_at', 'title', 'make', 'model', 'year', 'kilometers',
-                                'price', 'condition', 'is_active', 'region'
-                            ]].copy()
-
-                            # Format date columns
-                            display_df['added_at'] = pd.to_datetime(display_df['added_at']).dt.strftime(
-                                '%Y-%m-%d %H:%M')
-
-                            # Format price
-                            display_df['price'] = display_df['price'].apply(
-                                lambda x: f"{x:,.0f} EGP" if pd.notnull(x) else "N/A"
-                            )
-
-                            st.dataframe(
-                                display_df,
-                                column_config={
-                                    "added_at": "Listed Date",
-                                    "title": "Title",
-                                    "make": "Make",
-                                    "model": "Model",
-                                    "year": "Year",
-                                    "kilometers": "Mileage",
-                                    "price": "Price",
-                                    "condition": "Condition",
-                                    "is_active": "Active",
-                                    "region": "Region"
-                                },
-                                use_container_width=True
-                            )
-
-                            # Add summary metrics
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                active_listings = len(olx_listings[olx_listings['is_active']])
-                                st.metric("Active Listings", active_listings)
-                            with col2:
-                                avg_price = olx_listings['price'].mean()
-                                st.metric("Average Price", f"{avg_price:,.0f} EGP")
-                            with col3:
-                                unique_models = len(olx_listings[['make', 'model']].drop_duplicates())
-                                st.metric("Unique Models", unique_models)
-                        else:
-                            st.info("No OLX listings found for this dealer in the last 30 days")
-
-                            # Additional debug information
-                            st.write("Debug: Checking dealer phone number")
-                            dealer_phone = dealer_data.get('dealer_phone', 'Not found')
-                            st.write(f"Dealer Phone Number: {dealer_phone}")
-
-                            # Query to check if phone number exists in OLX listings
-                            check_query = f"""
-                            SELECT DISTINCT seller_phone_number 
-                            FROM olx.listings 
-                            WHERE REGEXP_REPLACE(seller_phone_number, r'[^0-9,]', '') LIKE '%{dealer_phone}%'
-                            AND added_at >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
-                            LIMIT 5
-                            """
-                            try:
-                                check_df = client.query(check_query).to_dataframe()
-                                if not check_df.empty:
-                                    st.write("Found these phone numbers in OLX listings:")
-                                    st.write(check_df)
-                                else:
-                                    st.write("No matching phone numbers found in OLX listings")
-                            except Exception as e:
-                                st.write(f"Error checking phone numbers: {str(e)}")
-
-                except Exception as e:
-                    st.error(f"Error fetching OLX listings: {str(e)}")
-                    st.error(
-                        f"Debug info - Selected dealer: {selected_dealer}, Dealer info available: {not dealer_info.empty}")
-                    if 'dealer_data' in locals():
-                        st.error(f"Debug info - Dealer data: {dealer_data}")
 
 
     if __name__ == "__main__":
