@@ -623,52 +623,79 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
         return historical_df, live_cars_df, dealer_seg_df, activity_df, recent_views_df, recent_filters_df
 
 
+    # Define priority cases at the module level
+    critical_cases = [
+        'Active - Active (At Risk)',
+        'Active - Frequent (At Risk)',
+        'Frequent - Frequent (At Risk)',
+        'Frequent - No Purchase',
+        'Frequent - Active (At Risk)',
+        'Inactive - Active (At Risk)',
+        'Inactive - Frequent (At Risk)',
+        'Inactive - Frequent',
+        'No Purchase - Active (At Risk)',
+        'No Purchase - 1 Time Purchaser',
+        'No Purchase - Frequent (At Risk)'
+    ]
+
+    high_cases = [
+        'Active - No Purchase',
+        'Active - Frequent',
+        'Active - Inactive',
+        'Frequent - Active',
+        'Frequent - Inactive',
+        'Frequent - 1 Time Purchaser',
+        'Inactive - Active',
+        'No Purchase - Active',
+        'No Purchase - Frequent'
+    ]
+
+    medium_cases = [
+        'Active - 1 Time Purchaser',
+        'Active - Active',
+        'Active - Frequent (New)',
+        'Active - Active (New)',
+        'Frequent - Frequent',
+        'Frequent - Active (New)',
+        'Frequent - Frequent (New)',
+        'Inactive - Active (New)',
+        'Inactive - Frequent (New)',
+        'Inactive - Inactive',
+        'Inactive - No Purchase',
+        'Inactive - 1 Time Purchaser',
+        'No Purchase - Active (New)',
+        'No Purchase - Frequent (New)'
+    ]
+
+    low_cases = [
+        '1 Time Purchaser - No Purchase',
+        'No Purchase - Inactive',
+        'No Purchase - No Purchase'
+    ]
+
+
+    def get_priority(row):
+        """Determine priority level based on current segmentation."""
+        current_seg = row['current_segmentation']
+
+        if any(case in current_seg for case in critical_cases):
+            return '🔴 Critical Priority'
+        elif any(case in current_seg for case in high_cases):
+            return '🟠 High Priority'
+        elif any(case in current_seg for case in medium_cases):
+            return '🟡 Medium Priority'
+        else:
+            return '⚪ Low Priority'
+
+
     def get_dealers_needing_attention(dealer_seg_df):
         """Identify dealers who need attention based on their current segmentation and transitions."""
 
-        attention_needed = dealer_seg_df.copy()
-
-        def get_priority(row):
-            current_seg = row['current_segmentation']
-
-            # Critical Priority Cases
-            if any([
-                'Frequent - No Purchase' in current_seg,
-                'Active - No Purchase' in current_seg,
-                'Frequent - Active (At Risk)' in current_seg,
-                'Frequent - Frequent (At Risk)' in current_seg
-            ]):
-                return '🔴 Critical Priority'
-
-            # High Priority Cases
-            elif any([
-                'Active - Active (At Risk)' in current_seg,
-                'Frequent - Active' in current_seg,
-                'Active - Frequent (At Risk)' in current_seg,
-                'Inactive - Active (At Risk)' in current_seg,
-                'Inactive - Frequent (At Risk)' in current_seg
-            ]):
-                return '🟠 High Priority'
-
-            # Medium Priority Cases
-            elif any([
-                'No Purchase - Active' in current_seg,
-                'No Purchase - Frequent' in current_seg,
-                'Inactive - Active' in current_seg,
-                'Inactive - Frequent' in current_seg,
-                '1 Time Purchaser - No Purchase' in current_seg
-            ]):
-                return '🟡 Medium Priority'
-
-            # Low Priority Cases
-            else:
-                return '⚪ Low Priority'
+        # Filter out users, keep only dealers
+        attention_needed = dealer_seg_df[dealer_seg_df['user_vs_dealer_flag'] == 'Dealer'].copy()
 
         # Add priority based on current segmentation
         attention_needed['status'] = attention_needed.apply(get_priority, axis=1)
-
-        # Filter out low priority cases
-        attention_needed = attention_needed[attention_needed['status'] != '⚪ Low Priority'].copy()
 
         # Calculate activity metrics
         attention_needed['activity_drop'] = (
@@ -676,11 +703,33 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 attention_needed['avg_requests_per_month_60d']
         )
 
-        # Sort by priority (Critical -> High -> Medium) and then by activity drop
-        priority_order = ['🔴 Critical Priority', '🟠 High Priority', '🟡 Medium Priority']
+        # Sort by priority (Critical -> High -> Medium -> Low) and then by activity drop
+        priority_order = ['🔴 Critical Priority', '🟠 High Priority', '🟡 Medium Priority', '⚪ Low Priority']
+
+        def get_priority_score(row):
+            current_seg = row['current_segmentation']
+
+            # Get the list of cases for the row's priority level
+            if row['status'] == '🔴 Critical Priority':
+                cases = critical_cases
+            elif row['status'] == '🟠 High Priority':
+                cases = high_cases
+            elif row['status'] == '🟡 Medium Priority':
+                cases = medium_cases
+            else:
+                cases = low_cases
+
+            # Find the index of the case in its priority level list
+            for i, case in enumerate(cases):
+                if case in current_seg:
+                    return i
+            return len(cases)  # If not found, put at end of its priority group
+
+        attention_needed['priority_score'] = attention_needed.apply(get_priority_score, axis=1)
+
         return attention_needed.sort_values(
-            ['status', 'activity_drop'],
-            ascending=[True, False],
+            ['status', 'priority_score', 'activity_drop'],
+            ascending=[True, True, False],
             key=lambda x: pd.Categorical(x, categories=priority_order) if x.name == 'status' else x
         )
 
@@ -787,6 +836,57 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 with col4:
                     med_priority = len(attention_dealers[attention_dealers['status'] == '🟡 Medium Priority'])
                     st.metric("Medium Priority", med_priority)
+
+                # Add debug section to show all unique segmentation cases
+                with st.expander("Debug: All Segmentation Cases"):
+                    st.write("**All Unique Segmentation Cases Found:**")
+                    all_cases = attention_dealers['current_segmentation'].unique()
+
+                    # Group cases by priority
+                    critical_found = []
+                    high_found = []
+                    medium_found = []
+                    low_found = []
+                    unmatched = []
+
+                    for case in sorted(all_cases):
+                        test_row = pd.Series({'current_segmentation': case})
+                        priority = get_priority(test_row)
+
+                        if priority == '🔴 Critical Priority':
+                            critical_found.append(case)
+                        elif priority == '🟠 High Priority':
+                            high_found.append(case)
+                        elif priority == '🟡 Medium Priority':
+                            medium_found.append(case)
+                        elif priority == '⚪ Low Priority':
+                            low_found.append(case)
+                        else:
+                            unmatched.append(case)
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("🔴 **Critical Priority Cases Found:**")
+                        for case in sorted(critical_found):
+                            st.write(f"- {case}")
+
+                        st.write("\n🟠 **High Priority Cases Found:**")
+                        for case in sorted(high_found):
+                            st.write(f"- {case}")
+
+                    with col2:
+                        st.write("🟡 **Medium Priority Cases Found:**")
+                        for case in sorted(medium_found):
+                            st.write(f"- {case}")
+
+                        st.write("\n⚪ **Low Priority Cases Found:**")
+                        for case in sorted(low_found):
+                            st.write(f"- {case}")
+
+                    if unmatched:
+                        st.error("**Unmatched Cases:**")
+                        for case in sorted(unmatched):
+                            st.write(f"- {case}")
 
                 # Display dealer list with key metrics and direct links
                 for _, dealer in attention_dealers.iterrows():
@@ -963,7 +1063,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                     st.info("No recent filter applications found for this dealer")
 
             # Recommended Cars section
-            st.subheader("Recommended Cars - WIP")
+            st.subheader("Recommended Cars")
             dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
 
             if not dealer_historical.empty:
