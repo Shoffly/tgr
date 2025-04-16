@@ -68,10 +68,9 @@ if check_password():
                     'service_account.json'
                 )
             except FileNotFoundError:
-                st.error(
-                    "No credentials found. Please configure either Streamlit secrets or provide a service_account.json file.")
-                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-
+                st.error("No credentials found. Please configure either Streamlit secrets or provide a service_account.json file.")
+                return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        
         # Create a BigQuery client using the credentials
         client = bigquery.Client(credentials=credentials)
 
@@ -560,12 +559,51 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
             total_car_events_30d DESC
         """
 
-        # Execute queries
+        # New query for recent car views
+        recent_views_query = """
+        SELECT 
+            time,
+            make,
+            model,
+            trim,
+            year,
+            kilometrage,
+            transmission,
+            listing_title,
+            buy_now_price,
+            body_style,
+            entity_code as dealer_code
+        FROM `pricing-338819.silver_ajans_mixpanel.screen_car_profile_event`
+        WHERE DATE(time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+        AND entity_code IS NOT NULL
+        ORDER BY time DESC
+        """
+
+        # New query for recent filters
+        recent_filters_query = """
+        SELECT 
+            time,
+            make,
+            model,
+            year,
+            kilometrage,
+            group_filter,
+            status,
+            no_of_cars,
+            entity_code as dealer_code
+        FROM `pricing-338819.silver_ajans_mixpanel.action_filter`
+        WHERE DATE(time) >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+        AND entity_code IS NOT NULL
+        ORDER BY time DESC
+        """
+
+        # Execute all queries
         live_cars_df = client.query(live_cars_query).to_dataframe()
         historical_df = client.query(historical_query).to_dataframe()
-        print(historical_df)
         dealer_seg_df = client.query(dealer_seg_query).to_dataframe()
         activity_df = client.query(dealer_activity_query).to_dataframe()
+        recent_views_df = client.query(recent_views_query).to_dataframe()
+        recent_filters_df = client.query(recent_filters_query).to_dataframe()
 
         # Convert date columns
         historical_df['request_date'] = pd.to_datetime(historical_df['request_date'])
@@ -581,7 +619,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
         live_cars_df['year'] = pd.to_numeric(live_cars_df['year'], errors='coerce')
         live_cars_df['kilometers'] = pd.to_numeric(live_cars_df['kilometers'], errors='coerce')
 
-        return historical_df, live_cars_df, dealer_seg_df, activity_df
+        return historical_df, live_cars_df, dealer_seg_df, activity_df, recent_views_df, recent_filters_df
 
 
     def get_dealers_needing_attention(dealer_seg_df):
@@ -646,12 +684,80 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
         )
 
 
+    def get_recommended_cars(dealer_historical, live_cars):
+        """
+        Generate car recommendations based on dealer's historical purchases.
+        Returns a DataFrame with recommended cars and their match scores.
+        """
+        if dealer_historical.empty or live_cars.empty:
+            return pd.DataFrame()
+
+        # Calculate make preferences
+        make_counts = dealer_historical['make'].value_counts()
+        total_purchases = len(dealer_historical)
+        make_scores = make_counts / total_purchases * 3  # Scale to 0-3 points
+
+        # Calculate model preferences within each make
+        model_preferences = {}
+        for make in make_counts.index:
+            make_data = dealer_historical[dealer_historical['make'] == make]
+            model_counts = make_data['model'].value_counts()
+            model_preferences[make] = model_counts / len(make_data) * 2  # Scale to 0-2 points
+
+        # Calculate year and mileage ranges
+        year_mean = dealer_historical['year'].mean()
+        year_std = dealer_historical['year'].std()
+        km_mean = dealer_historical['kilometers'].mean()
+        km_std = dealer_historical['kilometers'].std()
+
+        # Score each available car
+        scored_cars = []
+        for _, car in live_cars.iterrows():
+            # Initialize score components
+            make_score = make_scores.get(car['make'], 0)
+            model_score = model_preferences.get(car['make'], pd.Series()).get(car['model'], 0)
+            
+            # Year score (0-2 points)
+            year_diff = abs(car['year'] - year_mean)
+            year_score = max(0, 2 - (year_diff / year_std)) if year_std > 0 else 0
+            year_score = min(2, max(0, year_score))  # Clamp between 0 and 2
+
+            # Kilometer score (0-2 points)
+            km_diff = abs(car['kilometers'] - km_mean)
+            km_score = max(0, 2 - (km_diff / km_std)) if km_std > 0 else 0
+            km_score = min(2, max(0, km_score))  # Clamp between 0 and 2
+
+            # Total score
+            total_score = make_score + model_score + year_score + km_score
+
+            # Create score breakdown
+            score_breakdown = f"Make: {make_score:.1f}, Model: {model_score:.1f}, Year: {year_score:.1f}, Mileage: {km_score:.1f}"
+
+            # Add to results
+            scored_cars.append({
+                'sf_vehicle_name': car['sf_vehicle_name'],
+                'make': car['make'],
+                'model': car['model'],
+                'year': car['year'],
+                'kilometers': car['kilometers'],
+                'match_score': total_score,
+                'score_breakdown': score_breakdown
+            })
+
+        # Convert to DataFrame and sort by score
+        recommendations = pd.DataFrame(scored_cars)
+        if not recommendations.empty:
+            recommendations = recommendations.sort_values('match_score', ascending=False)
+
+        return recommendations
+
+
     def main():
         st.title("🚗 SET - Sales Enablement Tool")
 
         # Load data
         with st.spinner("Loading data..."):
-            historical_df, live_cars_df, dealer_seg_df, activity_df = load_data()
+            historical_df, live_cars_df, dealer_seg_df, activity_df, recent_views_df, recent_filters_df = load_data()
 
         if historical_df.empty or dealer_seg_df.empty:
             st.warning("No data available. Please check your Google Sheet connection.")
@@ -778,52 +884,129 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 st.info(f"Request Activity (Lifetime): {dealer_info['request_activity_bucket_lifetime']}")
                 st.info(f"Request Activity (60d): {dealer_info['request_activity_bucket_60d']}")
 
-            # Move Recommended Cars section here
-            # st.subheader("Recommended Cars")
+            # Recent Activity section
+            st.subheader("Recent Activity")
+            
+            # Get dealer's recent views and filters
+            dealer_views = recent_views_df[recent_views_df['dealer_code'] == dealer_info['dealer_code']].copy()
+            dealer_filters = recent_filters_df[recent_filters_df['dealer_code'] == dealer_info['dealer_code']].copy()
+
+            # Create tabs for views and filters
+            recent_tab1, recent_tab2 = st.tabs(["🔍 Recent Views", "🎯 Recent Filters"])
+
+            with recent_tab1:
+                if not dealer_views.empty:
+                    # Format the time column
+                    dealer_views['time'] = pd.to_datetime(dealer_views['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Format the price column
+                    dealer_views['buy_now_price'] = dealer_views['buy_now_price'].apply(
+                        lambda x: f"EGP {x:,.0f}" if pd.notnull(x) else "N/A"
+                    )
+                    
+                    # Format the kilometrage column
+                    dealer_views['kilometrage'] = dealer_views['kilometrage'].apply(
+                        lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A"
+                    )
+                    
+                    # Display recent views
+                    st.dataframe(
+                        dealer_views[['time', 'make', 'model', 'trim', 'year', 'kilometrage', 
+                                    'transmission', 'buy_now_price', 'body_style']],
+                        column_config={
+                            "time": "Viewed At",
+                            "make": "Make",
+                            "model": "Model",
+                            "trim": "Trim",
+                            "year": "Year",
+                            "kilometrage": "Mileage",
+                            "transmission": "Transmission",
+                            "buy_now_price": "Price",
+                            "body_style": "Body Style"
+                        },
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No recent car views found for this dealer")
+
+            with recent_tab2:
+                if not dealer_filters.empty:
+                    # Format the time column
+                    dealer_filters['time'] = pd.to_datetime(dealer_filters['time']).dt.strftime('%Y-%m-%d %H:%M:%S')
+                    
+                    # Format the kilometrage column
+                    dealer_filters['kilometrage'] = dealer_filters['kilometrage'].apply(
+                        lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A"
+                    )
+                    
+                    # Display recent filters
+                    st.dataframe(
+                        dealer_filters[['time', 'make', 'model', 'year', 'kilometrage', 
+                                      'group_filter', 'status', 'no_of_cars']],
+                        column_config={
+                            "time": "Filter Applied At",
+                            "make": "Make",
+                            "model": "Model",
+                            "year": "Year",
+                            "kilometrage": "Mileage Range",
+                            "group_filter": "Filter Group",
+                            "status": "Status",
+                            "no_of_cars": st.column_config.NumberColumn(
+                                "Number of Cars",
+                                help="Number of cars matching the filter criteria"
+                            )
+                        },
+                        use_container_width=True
+                    )
+                else:
+                    st.info("No recent filter applications found for this dealer")
+
+            # Recommended Cars section
+            st.subheader("Recommended Cars")
             dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
 
-            # if not dealer_historical.empty:
-            #     recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
-            #
-            #     if not recommended_cars.empty:
-            #         st.dataframe(
-            #             recommended_cars,
-            #             column_config={
-            #                 "match_score": st.column_config.ProgressColumn(
-            #                     "Match Score",
-            #                     help="How well this car matches the dealer's preferences (max 9 points)",
-            #                     format="%.1f",
-            #                     min_value=0,
-            #                     max_value=9
-            #                 ),
-            #                 "score_breakdown": "Score Breakdown",
-            #                 "sf_vehicle_name": "Vehicle",
-            #                 "make": "Make",
-            #                 "model": "Model",
-            #                 "year": "Year",
-            #                 "kilometers": st.column_config.NumberColumn(
-            #                     "Mileage",
-            #                     format="%d km"
-            #                 )
-            #             },
-            #             use_container_width=True
-            #         )
-            #
-            #         # Add explanation of scoring system
-            #         st.info("""
-            #         **Scoring System:**
-            #         - Make: 0-3 points (based on frequency of purchases)
-            #         - Model: 0-2 points (based on frequency within make)
-            #         - Year: 0-2 points (based on preferred year ranges)
-            #         - Mileage: 0-2 points (based on preferred km ranges)
-            #         Total possible score: 9 points
-            #         """)
-            #     else:
-            #         st.info("No matching cars found in current inventory")
-            # else:
-            #     st.info("Cannot generate recommendations without historical data")
+            if not dealer_historical.empty:
+                recommended_cars = get_recommended_cars(dealer_historical, live_cars_df)
 
-            # Historical Purchase Analysis (now after Recommended Cars)
+                if not recommended_cars.empty:
+                    st.dataframe(
+                        recommended_cars,
+                        column_config={
+                            "match_score": st.column_config.ProgressColumn(
+                                "Match Score",
+                                help="How well this car matches the dealer's preferences (max 9 points)",
+                                format="%.1f",
+                                min_value=0,
+                                max_value=9
+                            ),
+                            "score_breakdown": "Score Breakdown",
+                            "sf_vehicle_name": "Vehicle",
+                            "make": "Make",
+                            "model": "Model",
+                            "year": "Year",
+                            "kilometers": st.column_config.NumberColumn(
+                                "Mileage",
+                                format="%d km"
+                            )
+                        },
+                        use_container_width=True
+                    )
+
+                    # Add explanation of scoring system
+                    st.info("""
+                    **Scoring System:**
+                    - Make: 0-3 points (based on frequency of purchases)
+                    - Model: 0-2 points (based on frequency within make)
+                    - Year: 0-2 points (based on preferred year ranges)
+                    - Mileage: 0-2 points (based on preferred km ranges)
+                    Total possible score: 9 points
+                    """)
+                else:
+                    st.info("No matching cars found in current inventory")
+            else:
+                st.info("Cannot generate recommendations without historical data")
+
+            # Historical Purchase Analysis
             st.subheader("Historical Purchase Analysis")
 
             if not dealer_historical.empty:
