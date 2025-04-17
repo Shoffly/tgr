@@ -1065,79 +1065,41 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
 
     @st.dialog("Makes Distribution Analysis")
     def show_makes_analysis(all_makes):
-        # Create two columns
-        make_col1, make_col2 = st.columns(2)
-        with make_col1:
-            st.write("**Top Makes:**")
-            for make, count in all_makes.items():
-                st.write(f"• {make}: {count} purchases")
-        with make_col2:
-            # Create a pie chart of makes
-            fig = px.pie(
-                values=all_makes.values,
-                names=all_makes.index,
-                title='Makes Distribution'
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        st.write("**Makes Distribution:**")
+        for make, count in all_makes.items():
+            percentage = (count / all_makes.sum()) * 100
+            st.write(f"• {make}: {count} purchases ({percentage:.1f}%)")
 
 
     @st.dialog("Mileage Distribution Analysis")
     def show_mileage_analysis(all_mileage):
-        # Create two columns
-        mileage_col1, mileage_col2 = st.columns(2)
-        with mileage_col1:
-            st.write("**Mileage Ranges:**")
-            for range_, count in all_mileage.items():
-                st.write(f"• {range_}: {count} purchases")
-        with mileage_col2:
-            # Create a bar chart of mileage ranges
-            fig = px.bar(
-                x=all_mileage.index,
-                y=all_mileage.values,
-                title='Mileage Distribution',
-                labels={'x': 'Mileage Range', 'y': 'Number of Purchases'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        st.write("**Mileage Range Distribution:**")
+        for range_, count in all_mileage.items():
+            percentage = (count / all_mileage.sum()) * 100
+            st.write(f"• {range_}: {count} purchases ({percentage:.1f}%)")
 
 
     @st.dialog("Models Distribution Analysis")
     def show_models_analysis(all_models):
-        # Create two columns
-        model_col1, model_col2 = st.columns(2)
-        with model_col1:
-            st.write("**Top Models:**")
-            for (make, model), count in all_models.head(10).items():
-                st.write(f"• {make} {model}: {count} purchases")
-        with model_col2:
-            # Create a bar chart of top 10 models
-            top_10_models = all_models.head(10)
-            fig = px.bar(
-                x=[f"{make} {model}" for make, model in top_10_models.index],
-                y=top_10_models.values,
-                title='Top 10 Models',
-                labels={'x': 'Model', 'y': 'Number of Purchases'}
-            )
-            fig.update_xaxes(tickangle=45)
-            st.plotly_chart(fig, use_container_width=True)
+        st.write("**Top 10 Models:**")
+        total_purchases = all_models.sum()
+        for (make, model), count in all_models.head(10).items():
+            percentage = (count / total_purchases) * 100
+            st.write(f"• {make} {model}: {count} purchases ({percentage:.1f}%)")
 
 
     @st.dialog("Price Distribution Analysis")
     def show_price_analysis(dealer_historical, price_stats):
-        # Create two columns
-        price_col1, price_col2 = st.columns(2)
-        with price_col1:
-            st.write("**Price Statistics:**")
-            for stat, value in price_stats.items():
-                st.write(f"• {stat}: {value}")
-        with price_col2:
-            # Create a histogram of prices
-            fig = px.histogram(
-                dealer_historical,
-                x='price',
-                title='Price Distribution',
-                labels={'price': 'Price (EGP)', 'count': 'Number of Purchases'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
+        st.write("**Price Statistics:**")
+        for stat, value in price_stats.items():
+            st.write(f"• {stat}: {value}")
+
+        # Add some additional useful statistics
+        st.write("\n**Price Distribution:**")
+        percentiles = [25, 50, 75]
+        for p in percentiles:
+            value = dealer_historical['price'].quantile(p / 100)
+            st.write(f"• {p}th percentile: EGP {value:,.0f}")
 
 
     def main():
