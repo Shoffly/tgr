@@ -912,6 +912,234 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
             return pd.DataFrame()
 
 
+    def get_dealer_requests(client, dealer_code):
+        """
+        Get dealer requests data for a specific dealer.
+        Returns four dataframes: all requests, succeeded, failed before visit, and failed after visit requests.
+        """
+        # Query for all requests
+        all_requests_query = """
+        SELECT 
+            dealer_code,
+            vehicle_request_created_at,
+            request_type,
+            request_status,
+            contacted_at,
+            contacted_user,
+            visited_at,
+            visited_user,
+            succeeded_at,
+            failed_before_visit_at,
+            failed_after_visit_at,
+            failure_reason,
+            car_name,
+            car_make,
+            car_model,
+            car_year,
+            car_kilometrage,
+            buy_now_price,
+            discounted_price
+        FROM `pricing-338819.ajans_dealers.dealer_requests` 
+        WHERE dealer_code = @dealer_id 
+        ORDER BY vehicle_request_created_at DESC
+        LIMIT 10
+        """
+
+        # Query for succeeded requests
+        succeeded_query = """
+        SELECT 
+            dealer_code,
+            vehicle_request_created_at,
+            request_type,
+            contacted_at,
+            contacted_user,
+            visited_at,
+            visited_user,
+            succeeded_at,
+            car_name,
+            car_make,
+            car_model,
+            car_year,
+            car_kilometrage,
+            buy_now_price,
+            discounted_price
+        FROM `pricing-338819.ajans_dealers.dealer_requests` 
+        WHERE dealer_code = @dealer_id 
+        AND request_status = 'Succeeded'
+        ORDER BY vehicle_request_created_at DESC
+        LIMIT 10
+        """
+
+        # Query for failed before visit requests
+        failed_before_query = """
+        SELECT 
+            dealer_code,
+            vehicle_request_created_at,
+            request_type,
+            contacted_at,
+            contacted_user,
+            failed_before_visit_at,
+            failure_reason,
+            car_name,
+            car_make,
+            car_model,
+            car_year,
+            car_kilometrage,
+            buy_now_price,
+            discounted_price
+        FROM `pricing-338819.ajans_dealers.dealer_requests` 
+        WHERE dealer_code = @dealer_id 
+        AND request_status = 'Failed Before Visit'
+        ORDER BY vehicle_request_created_at DESC
+        LIMIT 10
+        """
+
+        # Query for failed after visit requests
+        failed_after_query = """
+        SELECT 
+            dealer_code,
+            vehicle_request_created_at,
+            request_type,
+            contacted_at,
+            contacted_user,
+            visited_at,
+            visited_user,
+            failed_after_visit_at,
+            failure_reason,
+            car_name,
+            car_make,
+            car_model,
+            car_year,
+            car_kilometrage,
+            buy_now_price,
+            discounted_price
+        FROM `pricing-338819.ajans_dealers.dealer_requests` 
+        WHERE dealer_code = @dealer_id 
+        AND request_status = 'Failed After Visit'
+        ORDER BY vehicle_request_created_at DESC
+        LIMIT 10
+        """
+
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("dealer_id", "STRING", dealer_code)
+            ]
+        )
+
+        try:
+            all_requests_df = client.query(all_requests_query, job_config=job_config).to_dataframe()
+            succeeded_df = client.query(succeeded_query, job_config=job_config).to_dataframe()
+            failed_before_df = client.query(failed_before_query, job_config=job_config).to_dataframe()
+            failed_after_df = client.query(failed_after_query, job_config=job_config).to_dataframe()
+
+            # Format datetime columns
+            datetime_columns = ['vehicle_request_created_at', 'contacted_at', 'visited_at',
+                                'succeeded_at', 'failed_before_visit_at', 'failed_after_visit_at']
+
+            for df in [all_requests_df, succeeded_df, failed_before_df, failed_after_df]:
+                for col in datetime_columns:
+                    if col in df.columns:
+                        df[col] = pd.to_datetime(df[col]).dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            # Format price columns
+            if 'buy_now_price' in df.columns:
+                df['buy_now_price'] = df['buy_now_price'].apply(
+                    lambda x: f"EGP {x:,.0f}" if pd.notnull(x) else "N/A"
+                )
+            if 'discounted_price' in df.columns:
+                df['discounted_price'] = df['discounted_price'].apply(
+                    lambda x: f"EGP {x:,.0f}" if pd.notnull(x) else "N/A"
+                )
+
+            # Format kilometrage
+            if 'car_kilometrage' in df.columns:
+                df['car_kilometrage'] = df['car_kilometrage'].apply(
+                    lambda x: f"{x:,.0f} km" if pd.notnull(x) else "N/A"
+                )
+
+            return all_requests_df, succeeded_df, failed_before_df, failed_after_df
+        except Exception as e:
+            print(f"Error executing query: {e}")
+            return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+
+    @st.dialog("Makes Distribution Analysis")
+    def show_makes_analysis(all_makes):
+        # Create two columns
+        make_col1, make_col2 = st.columns(2)
+        with make_col1:
+            st.write("**Top Makes:**")
+            for make, count in all_makes.items():
+                st.write(f"• {make}: {count} purchases")
+        with make_col2:
+            # Create a pie chart of makes
+            fig = px.pie(
+                values=all_makes.values,
+                names=all_makes.index,
+                title='Makes Distribution'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
+    @st.dialog("Mileage Distribution Analysis")
+    def show_mileage_analysis(all_mileage):
+        # Create two columns
+        mileage_col1, mileage_col2 = st.columns(2)
+        with mileage_col1:
+            st.write("**Mileage Ranges:**")
+            for range_, count in all_mileage.items():
+                st.write(f"• {range_}: {count} purchases")
+        with mileage_col2:
+            # Create a bar chart of mileage ranges
+            fig = px.bar(
+                x=all_mileage.index,
+                y=all_mileage.values,
+                title='Mileage Distribution',
+                labels={'x': 'Mileage Range', 'y': 'Number of Purchases'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
+    @st.dialog("Models Distribution Analysis")
+    def show_models_analysis(all_models):
+        # Create two columns
+        model_col1, model_col2 = st.columns(2)
+        with model_col1:
+            st.write("**Top Models:**")
+            for (make, model), count in all_models.head(10).items():
+                st.write(f"• {make} {model}: {count} purchases")
+        with model_col2:
+            # Create a bar chart of top 10 models
+            top_10_models = all_models.head(10)
+            fig = px.bar(
+                x=[f"{make} {model}" for make, model in top_10_models.index],
+                y=top_10_models.values,
+                title='Top 10 Models',
+                labels={'x': 'Model', 'y': 'Number of Purchases'}
+            )
+            fig.update_xaxes(tickangle=45)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+    @st.dialog("Price Distribution Analysis")
+    def show_price_analysis(dealer_historical, price_stats):
+        # Create two columns
+        price_col1, price_col2 = st.columns(2)
+        with price_col1:
+            st.write("**Price Statistics:**")
+            for stat, value in price_stats.items():
+                st.write(f"• {stat}: {value}")
+        with price_col2:
+            # Create a histogram of prices
+            fig = px.histogram(
+                dealer_historical,
+                x='price',
+                title='Price Distribution',
+                labels={'price': 'Price (EGP)', 'count': 'Number of Purchases'}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
     def main():
         st.title("🚗 SET - Sales Enablement Tool")
 
@@ -1026,61 +1254,137 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
             # Sidebar filters
             st.sidebar.header("Filters")
 
-            # Get list of dealers that exist in both segmentation and activity data
-            valid_dealers = sorted(
-                set(dealer_seg_df['dealer_name'].unique()) & set(activity_df['dealer_name'].unique()))
-
-            if not valid_dealers:
-                st.error("No dealers found with both segmentation and activity data.")
-                return
-
-            # Dealer selection - check if we came from inbox
-            default_dealer = st.query_params.get('dealer', None)
-            default_index = valid_dealers.index(default_dealer) if default_dealer in valid_dealers else 0
-
-            # Dealer selection
-            selected_dealer = st.sidebar.selectbox(
-                "Select Dealer",
-                options=valid_dealers,
-                index=default_index
+            # Add search method selection
+            search_method = st.sidebar.radio(
+                "Search by",
+                ["Dealer Name", "Dealer Code"]
             )
 
-            # Get dealer details
-            dealer_info = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer]
-            dealer_activity = activity_df[activity_df['dealer_name'] == selected_dealer]
+            # Get list of dealers and their codes
+            valid_dealers_df = pd.DataFrame({
+                'dealer_name': dealer_seg_df['dealer_name'],
+                'dealer_code': dealer_seg_df['dealer_code']
+            }).drop_duplicates()
+
+            # Check if we came from inbox
+            default_dealer = st.query_params.get('dealer', None)
+
+            if search_method == "Dealer Name":
+                # Sort dealers by name
+                valid_dealers = sorted(valid_dealers_df['dealer_name'].unique())
+                default_index = valid_dealers.index(default_dealer) if default_dealer in valid_dealers else 0
+
+                # Dealer selection
+                selected_dealer_name = st.sidebar.selectbox(
+                    "Select Dealer",
+                    options=valid_dealers,
+                    index=default_index
+                )
+                # Get corresponding dealer code
+                selected_dealer_code = \
+                valid_dealers_df[valid_dealers_df['dealer_name'] == selected_dealer_name]['dealer_code'].iloc[0]
+            else:
+                # Sort dealers by code
+                valid_dealer_codes = sorted(valid_dealers_df['dealer_code'].unique())
+
+                selected_dealer_code = st.sidebar.selectbox(
+                    "Select Dealer Code",
+                    options=valid_dealer_codes
+                )
+                # Get corresponding dealer name
+                selected_dealer_name = \
+                valid_dealers_df[valid_dealers_df['dealer_code'] == selected_dealer_code]['dealer_name'].iloc[0]
+
+            # Display selected dealer info
+            st.sidebar.info(f"Selected Dealer: {selected_dealer_name}\nDealer Code: {selected_dealer_code}")
+
+            # Get dealer details using the name (since that's how the dataframes are indexed)
+            dealer_info = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer_name]
+            dealer_activity = activity_df[activity_df['dealer_name'] == selected_dealer_name]
+            dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer_name].copy()
 
             if dealer_info.empty:
-                st.error(f"No segmentation data found for dealer: {selected_dealer}")
+                st.error(f"No segmentation data found for dealer: {selected_dealer_name}")
                 return
 
             if dealer_activity.empty:
-                st.error(f"No activity data found for dealer: {selected_dealer}")
+                st.error(f"No activity data found for dealer: {selected_dealer_name}")
                 return
 
+            # Get single row data
             dealer_info = dealer_info.iloc[0]
             dealer_activity = dealer_activity.iloc[0]
 
-            # Main content
-            st.header(f"Dealer Profile: {selected_dealer}")
+            # Initialize metrics variables
+            top_makes_str = "No data"
+            top_models_str = "No data"
+            top_mileage_str = "No data"
+            price_range = "No data"
+
+            # Get historical purchase patterns
+            if not dealer_historical.empty:
+                # Calculate top makes
+                top_makes = dealer_historical['make'].value_counts().head(3)
+                top_makes_str = ", ".join([f"{make} ({count})" for make, count in top_makes.items()])
+                all_makes = dealer_historical['make'].value_counts()
+
+                # Calculate top models
+                top_models = dealer_historical.groupby(['make', 'model']).size().sort_values(ascending=False).head(3)
+                top_models_str = ", ".join([f"{make} {model} ({count})" for (make, model), count in top_models.items()])
+                all_models = dealer_historical.groupby(['make', 'model']).size().sort_values(ascending=False)
+
+                # Calculate mileage ranges
+                dealer_historical['mileage_range'] = pd.cut(
+                    dealer_historical['kilometers'],
+                    bins=[0, 50000, 100000, 150000, float('inf')],
+                    labels=['0-50K', '50K-100K', '100K-150K', '150K+']
+                )
+                top_mileage = dealer_historical['mileage_range'].value_counts().head(2)
+                top_mileage_str = ", ".join([f"{range_} ({count})" for range_, count in top_mileage.items()])
+                all_mileage = dealer_historical['mileage_range'].value_counts()
+
+                # Calculate average price range
+                avg_price = dealer_historical['price'].mean()
+                price_std = dealer_historical['price'].std()
+                price_range = f"EGP {(avg_price - price_std):,.0f} - {(avg_price + price_std):,.0f}"
+
+                # Calculate detailed price statistics
+                price_stats = {
+                    'Average Price': f"EGP {avg_price:,.0f}",
+                    'Minimum Price': f"EGP {dealer_historical['price'].min():,.0f}",
+                    'Maximum Price': f"EGP {dealer_historical['price'].max():,.0f}",
+                    'Median Price': f"EGP {dealer_historical['price'].median():,.0f}",
+                    'Price Range (±1 std)': price_range
+                }
 
             # Key metrics
             col1, col2, col3, col4 = st.columns(4)
 
             with col1:
-                st.metric("Total Lifetime Purchases", dealer_info['total_purchases_lifetime'])
-                st.metric("Last 60 Days Purchases", dealer_info['total_purchases_60d'])
+                st.metric("Active Days (30d)", int(dealer_activity['active_days_30d']))
+                st.metric("Car Events (30d)", int(dealer_activity['total_car_events_30d']))
 
             with col2:
-                st.metric("Total Lifetime Requests", dealer_info['total_requests_lifetime'])
-                st.metric("Last 60 Days Requests", dealer_info['total_requests_60d'])
+                st.metric("Active Days (7d)", int(dealer_activity['active_days_7d']))
+                st.metric("Car Events (7d)", int(dealer_activity['total_car_events_7d']))
 
             with col3:
-                st.metric("Active Days (30d)", dealer_activity['active_days_30d'])
-                st.metric("Car Events (30d)", dealer_activity['total_car_events_30d'])
+                st.metric("Top Makes", len(all_makes) if not dealer_historical.empty else "No data")
+                if not dealer_historical.empty and st.button("Top Makes Analysis", key="show_makes"):
+                    show_makes_analysis(all_makes)
+
+                st.metric("Preferred Mileage", len(all_mileage) if not dealer_historical.empty else "No data")
+                if not dealer_historical.empty and st.button("Mileage Analysis", key="show_mileage"):
+                    show_mileage_analysis(all_mileage)
 
             with col4:
-                st.metric("Active Days (7d)", dealer_activity['active_days_7d'])
-                st.metric("Car Events (7d)", dealer_activity['total_car_events_7d'])
+                st.metric("Top Models", len(all_models) if not dealer_historical.empty else "No data")
+                if not dealer_historical.empty and st.button("Models Analysis", key="show_models"):
+                    show_models_analysis(all_models)
+
+                st.metric("Price Analysis", "View" if not dealer_historical.empty else "No data")
+                if not dealer_historical.empty and st.button("Price Analysis", key="show_price"):
+                    show_price_analysis(dealer_historical, price_stats)
 
             # Segmentation Information
             st.subheader("Dealer Segmentation")
@@ -1172,6 +1476,149 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                 else:
                     st.info("No recent filter applications found for this dealer")
 
+            # Add Dealer Requests section
+            st.subheader("Dealer Requests")
+
+            if dealer_info.empty:
+                st.warning("No dealer information available")
+            else:
+                try:
+                    # Get credentials and create client
+                    try:
+                        credentials = service_account.Credentials.from_service_account_info(
+                            st.secrets["service_account"]
+                        )
+                    except (KeyError, FileNotFoundError):
+                        try:
+                            credentials = service_account.Credentials.from_service_account_file(
+                                'service_account.json'
+                            )
+                        except FileNotFoundError:
+                            st.error("No credentials found for BigQuery access")
+                            credentials = None
+
+                    if credentials:
+                        client = bigquery.Client(credentials=credentials)
+                        dealer_data = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer_name].iloc[0]
+                        dealer_id = dealer_data['dealer_code']
+
+                        all_requests, succeeded_requests, failed_before_requests, failed_after_requests = get_dealer_requests(
+                            client, dealer_id)
+
+                        # Create tabs for different request types
+                        req_tab1, req_tab2, req_tab3, req_tab4 = st.tabs([
+                            "📋 All Requests",
+                            "✅ Succeeded Requests",
+                            "❌ Failed Before Visit",
+                            "⚠️ Failed After Visit"
+                        ])
+
+                        with req_tab1:
+                            if not all_requests.empty:
+                                st.dataframe(
+                                    all_requests,
+                                    column_config={
+                                        "vehicle_request_created_at": "Request Date",
+                                        "request_type": "Request Type",
+                                        "request_status": "Status",
+                                        "contacted_at": "Contacted At",
+                                        "contacted_user": "Contacted By",
+                                        "visited_at": "Visit Date",
+                                        "visited_user": "Visited By",
+                                        "succeeded_at": "Success Date",
+                                        "failed_before_visit_at": "Failed Before Visit At",
+                                        "failed_after_visit_at": "Failed After Visit At",
+                                        "failure_reason": "Failure Reason",
+                                        "car_name": "Car Name",
+                                        "car_make": "Make",
+                                        "car_model": "Model",
+                                        "car_year": "Year",
+                                        "car_kilometrage": "Mileage",
+                                        "buy_now_price": "Buy Now Price",
+                                        "discounted_price": "Discounted Price"
+                                    },
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("No requests found")
+
+                        with req_tab2:
+                            if not succeeded_requests.empty:
+                                st.dataframe(
+                                    succeeded_requests,
+                                    column_config={
+                                        "vehicle_request_created_at": "Request Date",
+                                        "request_type": "Request Type",
+                                        "contacted_at": "Contacted At",
+                                        "contacted_user": "Contacted By",
+                                        "visited_at": "Visit Date",
+                                        "visited_user": "Visited By",
+                                        "succeeded_at": "Success Date",
+                                        "car_name": "Car Name",
+                                        "car_make": "Make",
+                                        "car_model": "Model",
+                                        "car_year": "Year",
+                                        "car_kilometrage": "Mileage",
+                                        "buy_now_price": "Buy Now Price",
+                                        "discounted_price": "Discounted Price"
+                                    },
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("No successful requests found")
+
+                        with req_tab3:
+                            if not failed_before_requests.empty:
+                                st.dataframe(
+                                    failed_before_requests,
+                                    column_config={
+                                        "vehicle_request_created_at": "Request Date",
+                                        "request_type": "Request Type",
+                                        "contacted_at": "Contacted At",
+                                        "contacted_user": "Contacted By",
+                                        "failed_before_visit_at": "Failed At",
+                                        "failure_reason": "Failure Reason",
+                                        "car_name": "Car Name",
+                                        "car_make": "Make",
+                                        "car_model": "Model",
+                                        "car_year": "Year",
+                                        "car_kilometrage": "Mileage",
+                                        "buy_now_price": "Buy Now Price",
+                                        "discounted_price": "Discounted Price"
+                                    },
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("No requests failed before visit")
+
+                        with req_tab4:
+                            if not failed_after_requests.empty:
+                                st.dataframe(
+                                    failed_after_requests,
+                                    column_config={
+                                        "vehicle_request_created_at": "Request Date",
+                                        "request_type": "Request Type",
+                                        "contacted_at": "Contacted At",
+                                        "contacted_user": "Contacted By",
+                                        "visited_at": "Visit Date",
+                                        "visited_user": "Visited By",
+                                        "failed_after_visit_at": "Failed At",
+                                        "failure_reason": "Failure Reason",
+                                        "car_name": "Car Name",
+                                        "car_make": "Make",
+                                        "car_model": "Model",
+                                        "car_year": "Year",
+                                        "car_kilometrage": "Mileage",
+                                        "buy_now_price": "Buy Now Price",
+                                        "discounted_price": "Discounted Price"
+                                    },
+                                    use_container_width=True
+                                )
+                            else:
+                                st.info("No requests failed after visit")
+                except Exception as e:
+                    st.error(f"Error fetching dealer requests: {str(e)}")
+
             # Add OLX Listings section
             st.subheader("OLX Listings")
 
@@ -1195,7 +1642,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
 
                     if credentials:
                         client = bigquery.Client(credentials=credentials)
-                        dealer_data = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer].iloc[0]
+                        dealer_data = dealer_seg_df[dealer_seg_df['dealer_name'] == selected_dealer_name].iloc[0]
                         dealer_id = dealer_data['dealer_code']
 
                         olx_listings = get_olx_listings_for_dealer(client, dealer_id)
@@ -1250,7 +1697,7 @@ ORDER BY total_requests_lifetime DESC NULLS LAST;
                     st.error("Error fetching OLX listings")
 
             # Get dealer historical data for recommendations and analysis
-            dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer].copy()
+            dealer_historical = historical_df[historical_df['dealer_name'] == selected_dealer_name].copy()
 
             # Recommended Cars section
             st.subheader("Recommended Cars")
